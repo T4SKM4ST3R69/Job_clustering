@@ -51,7 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Define tokenizer function at module level (CRITICAL FIX)
+# CRITICAL FIX: Move tokenizer to module level
 def custom_tokenizer(text):
     """Custom tokenizer that splits on commas and cleans tokens"""
     if pd.isna(text) or text == "" or text is None:
@@ -62,7 +62,7 @@ def preprocess_skills(skills_text):
     """Preprocess skills text for vectorization"""
     if pd.isna(skills_text) or skills_text == "" or skills_text is None:
         return ""
-    # Clean text using regex and return lowercase
+    # Use regex to clean text properly
     cleaned = re.sub(r'[^a-zA-Z, ]', '', str(skills_text))
     return cleaned.lower()
 
@@ -89,7 +89,7 @@ class JobClusteringSystem:
             else:
                 st.warning("❌ Model files not found. Creating fallback vectorizer...")
                 self.kmeans_model = None
-                # Create fallback vectorizer without custom tokenizer
+                # Create fallback vectorizer without custom tokenizer to avoid serialization issues
                 self.tfidf_vectorizer = TfidfVectorizer(
                     lowercase=True,
                     max_features=1000,
@@ -100,7 +100,7 @@ class JobClusteringSystem:
             st.error(f"Error loading models: {str(e)}")
             st.info("Creating new vectorizer as fallback...")
             self.kmeans_model = None
-            # Fallback to simple vectorizer without custom functions
+            # Fallback to simple vectorizer
             self.tfidf_vectorizer = TfidfVectorizer(
                 lowercase=True,
                 max_features=1000,
@@ -335,6 +335,7 @@ def main():
             with col2:
                 st.metric("Unique Companies", df['Company'].nunique())
             with col3:
+                # Check if Cluster column exists
                 if 'Cluster' in df.columns:
                     st.metric("Clusters", df['Cluster'].nunique())
                 else:
@@ -346,7 +347,7 @@ def main():
                 else:
                     st.metric("Last Check", "Never")
             
-            # Show data preview if Cluster column exists
+            # Show cluster analysis only if Cluster column exists
             if 'Cluster' in df.columns:
                 # Cluster distribution
                 st.subheader("📊 Cluster Distribution")
@@ -382,13 +383,49 @@ def main():
                     cluster_jobs[['Title', 'Company', 'Location', 'Experience']].head(5),
                     use_container_width=True
                 )
+            else:
+                st.info("💡 No cluster data found. Jobs have been scraped but not yet clustered.")
+            
+            # Company distribution
+            st.subheader("🏢 Top Companies")
+            company_counts = df['Company'].value_counts().head(10)
+            fig_company = px.pie(
+                values=company_counts.values,
+                names=company_counts.index,
+                title="Top 10 Companies by Job Count"
+            )
+            st.plotly_chart(fig_company, use_container_width=True)
             
             # Show data preview
             st.subheader("📋 Recent Jobs")
             st.dataframe(df.head(10), use_container_width=True)
             
         else:
-            st.warning("No job data found. Please run the training script or scrape new jobs first.")
+            # SOLUTION FOR "No job data found" - Provide clear guidance
+            st.warning("📭 No job data found in the database.")
+            st.markdown("""
+            ### 🚀 Getting Started
+            
+            To start using the system, you have two options:
+            
+            **Option 1: Scrape New Jobs**
+            1. Go to the **🔄 Manual Scraping** page
+            2. Enter keywords (e.g., "data scientist", "machine learning")
+            3. Click "🚀 Start Scraping" to collect job data
+            4. Save the scraped jobs to the database
+            
+            **Option 2: Load Existing Data**
+            1. If you have a `clustered_jobs.csv` file, place it in the same directory as this app
+            2. Refresh the page to see your data
+            
+            **Need Clustering Models?**
+            - Train clustering models using your scraped data
+            - Models will be saved as `kmeans_model.joblib` and `tfidf_vectorizer.joblib`
+            """)
+            
+            # Quick start button
+            if st.button("🚀 Start Scraping Jobs Now"):
+                st.switch_page("🔄 Manual Scraping")
     
     elif page == "⚙️ Configuration":
         st.header("⚙️ System Configuration")
@@ -458,7 +495,7 @@ def main():
         with col1:
             keywords_input = st.text_area(
                 "Keywords (one per line)",
-                value="data scientist\nmachine learning engineer",
+                value="data scientist\nmachine learning engineer\ndata analyst",
                 height=100
             )
         
@@ -485,7 +522,7 @@ def main():
                 if not truly_new_jobs.empty:
                     st.info(f"🆕 Found {len(truly_new_jobs)} new jobs!")
                     
-                    # Add cluster predictions
+                    # Add cluster predictions if model exists
                     if job_system.kmeans_model and job_system.tfidf_vectorizer:
                         truly_new_jobs['Predicted_Cluster'] = truly_new_jobs['Skills'].apply(
                             job_system.predict_cluster
@@ -511,20 +548,21 @@ def main():
                                     st.success("✅ Email alert sent!")
                                 else:
                                     st.warning("No matching jobs for your preferred clusters")
-                        
-                        # Option to save new jobs
-                        if st.button("💾 Add to Database"):
-                            if os.path.exists(job_system.data_path):
-                                existing_df = pd.read_csv(job_system.data_path)
-                                updated_df = pd.concat([existing_df, truly_new_jobs], ignore_index=True)
-                            else:
-                                updated_df = truly_new_jobs
-                            
-                            updated_df.to_csv(job_system.data_path, index=False)
-                            st.success("✅ New jobs added to database!")
                     else:
                         st.warning("Models not loaded. Showing jobs without cluster predictions.")
                         st.dataframe(truly_new_jobs, use_container_width=True)
+                    
+                    # Option to save new jobs
+                    if st.button("💾 Add to Database"):
+                        if os.path.exists(job_system.data_path):
+                            existing_df = pd.read_csv(job_system.data_path)
+                            updated_df = pd.concat([existing_df, truly_new_jobs], ignore_index=True)
+                        else:
+                            updated_df = truly_new_jobs
+                        
+                        updated_df.to_csv(job_system.data_path, index=False)
+                        st.success("✅ New jobs added to database!")
+                        st.info("🔄 Refresh the Dashboard to see updated data.")
                 
                 else:
                     st.info("No new jobs found (all jobs already in database)")
