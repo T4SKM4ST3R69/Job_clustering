@@ -1,9 +1,10 @@
 streamlit
 pandas
-beautifulsoup4
-requests
-scikit-learn
 joblib
 yagmail
 schedule
-lxml
+requests
+beautifulsoup4
+plotly
+scikit-learn
+pathlib2
