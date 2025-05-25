@@ -51,18 +51,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Define tokenizer function at module level (outside class)
-def simple_tokenizer(text):
-    """Simple tokenizer that splits on commas and cleans tokens"""
+# Define tokenizer function at module level (CRITICAL FIX)
+def custom_tokenizer(text):
+    """Custom tokenizer that splits on commas and cleans tokens"""
     if pd.isna(text) or text == "" or text is None:
         return []
-    return [token.strip().lower() for token in str(text).split(',') if token.strip()]
+    return [token.strip() for token in str(text).split(',') if token.strip()]
 
-def preprocess_skills_text(skills_text):
+def preprocess_skills(skills_text):
     """Preprocess skills text for vectorization"""
     if pd.isna(skills_text) or skills_text == "" or skills_text is None:
         return ""
-    # Clean text and return lowercase version
+    # Clean text using regex and return lowercase
     cleaned = re.sub(r'[^a-zA-Z, ]', '', str(skills_text))
     return cleaned.lower()
 
@@ -80,16 +80,16 @@ class JobClusteringSystem:
         self.load_job_history()
     
     def load_models(self):
-        """Load saved models and data"""
+        """Load saved models and data with proper error handling"""
         try:
             if os.path.exists(self.model_path) and os.path.exists(self.vectorizer_path):
                 self.kmeans_model = joblib.load(self.model_path)
                 self.tfidf_vectorizer = joblib.load(self.vectorizer_path)
                 st.success("✅ Models loaded successfully!")
             else:
-                st.warning("❌ Model files not found. Creating new vectorizer...")
+                st.warning("❌ Model files not found. Creating fallback vectorizer...")
                 self.kmeans_model = None
-                # Create a new vectorizer without custom tokenizer
+                # Create fallback vectorizer without custom tokenizer
                 self.tfidf_vectorizer = TfidfVectorizer(
                     lowercase=True,
                     max_features=1000,
@@ -98,8 +98,9 @@ class JobClusteringSystem:
                 )
         except Exception as e:
             st.error(f"Error loading models: {str(e)}")
+            st.info("Creating new vectorizer as fallback...")
             self.kmeans_model = None
-            # Fallback to simple vectorizer
+            # Fallback to simple vectorizer without custom functions
             self.tfidf_vectorizer = TfidfVectorizer(
                 lowercase=True,
                 max_features=1000,
@@ -143,7 +144,7 @@ class JobClusteringSystem:
             return -1
         
         try:
-            processed_skills = preprocess_skills_text(skills_text)
+            processed_skills = preprocess_skills(skills_text)
             if not processed_skills:
                 return -1
             
@@ -345,12 +346,110 @@ def main():
                 else:
                     st.metric("Last Check", "Never")
             
+            # Show data preview if Cluster column exists
+            if 'Cluster' in df.columns:
+                # Cluster distribution
+                st.subheader("📊 Cluster Distribution")
+                cluster_counts = df['Cluster'].value_counts().sort_index()
+                fig_bar = px.bar(
+                    x=cluster_counts.index,
+                    y=cluster_counts.values,
+                    title="Jobs per Cluster",
+                    labels={'x': 'Cluster', 'y': 'Number of Jobs'}
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+                
+                # Detailed cluster view
+                st.subheader("🔍 Cluster Details")
+                selected_cluster = st.selectbox("Select Cluster to View:", sorted(df['Cluster'].unique()))
+                
+                cluster_jobs = df[df['Cluster'] == selected_cluster]
+                st.write(f"**Jobs in Cluster {selected_cluster}:** {len(cluster_jobs)}")
+                
+                # Show sample skills for this cluster
+                all_skills = []
+                for skills in cluster_jobs['Skills'].dropna():
+                    all_skills.extend(custom_tokenizer(skills))
+                
+                if all_skills:
+                    skill_counts = pd.Series(all_skills).value_counts().head(10)
+                    st.write("**Top Skills in this Cluster:**")
+                    st.bar_chart(skill_counts)
+                
+                # Show sample jobs
+                st.write("**Sample Jobs:**")
+                st.dataframe(
+                    cluster_jobs[['Title', 'Company', 'Location', 'Experience']].head(5),
+                    use_container_width=True
+                )
+            
             # Show data preview
             st.subheader("📋 Recent Jobs")
             st.dataframe(df.head(10), use_container_width=True)
             
         else:
             st.warning("No job data found. Please run the training script or scrape new jobs first.")
+    
+    elif page == "⚙️ Configuration":
+        st.header("⚙️ System Configuration")
+        
+        # Auto-scraping settings
+        st.subheader("🔄 Auto-Scraping Settings")
+        
+        auto_scrape = st.checkbox(
+            "Enable Daily Auto-Scraping",
+            value=job_system.config.get('auto_scrape', False)
+        )
+        
+        if auto_scrape:
+            scrape_time = st.time_input(
+                "Daily Scrape Time",
+                value=datetime.strptime(job_system.config.get('scrape_time', '09:00'), '%H:%M').time()
+            )
+            
+            keywords = st.text_area(
+                "Keywords to Search (one per line)",
+                value='\n'.join(job_system.config.get('keywords', ['data scientist']))
+            )
+            
+            pages_to_scrape = st.number_input(
+                "Pages to Scrape per Keyword",
+                min_value=1,
+                max_value=10,
+                value=job_system.config.get('pages', 2)
+            )
+        
+        # Cluster preferences
+        st.subheader("🎯 Alert Preferences")
+        
+        if os.path.exists(job_system.data_path):
+            df = pd.read_csv(job_system.data_path)
+            if 'Cluster' in df.columns:
+                available_clusters = sorted(df['Cluster'].unique())
+                
+                preferred_clusters = st.multiselect(
+                    "Select Clusters for Alerts",
+                    options=available_clusters,
+                    default=job_system.config.get('preferred_clusters', [])
+                )
+            else:
+                preferred_clusters = []
+                st.warning("No cluster data found. Please run clustering first.")
+        else:
+            preferred_clusters = []
+            st.warning("Load job data first to see available clusters")
+        
+        # Save configuration
+        if st.button("💾 Save Configuration"):
+            job_system.config.update({
+                'auto_scrape': auto_scrape,
+                'scrape_time': scrape_time.strftime('%H:%M') if auto_scrape else '09:00',
+                'keywords': keywords.split('\n') if auto_scrape else ['data scientist'],
+                'pages': pages_to_scrape if auto_scrape else 2,
+                'preferred_clusters': preferred_clusters
+            })
+            job_system.save_config()
+            st.success("✅ Configuration saved!")
     
     elif page == "🔄 Manual Scraping":
         st.header("🔄 Manual Job Scraping")
@@ -386,30 +485,50 @@ def main():
                 if not truly_new_jobs.empty:
                     st.info(f"🆕 Found {len(truly_new_jobs)} new jobs!")
                     
-                    # Add cluster predictions if model exists
+                    # Add cluster predictions
                     if job_system.kmeans_model and job_system.tfidf_vectorizer:
                         truly_new_jobs['Predicted_Cluster'] = truly_new_jobs['Skills'].apply(
                             job_system.predict_cluster
                         )
-                    
-                    # Show new jobs
-                    st.subheader("New Jobs Found")
-                    st.dataframe(truly_new_jobs, use_container_width=True)
-                    
-                    # Option to save new jobs
-                    if st.button("💾 Add to Database"):
-                        if os.path.exists(job_system.data_path):
-                            existing_df = pd.read_csv(job_system.data_path)
-                            updated_df = pd.concat([existing_df, truly_new_jobs], ignore_index=True)
-                        else:
-                            updated_df = truly_new_jobs
                         
-                        updated_df.to_csv(job_system.data_path, index=False)
-                        st.success("✅ New jobs added to database!")
+                        # Show new jobs
+                        st.subheader("New Jobs Found")
+                        st.dataframe(
+                            truly_new_jobs[['Title', 'Company', 'Location', 'Skills', 'Predicted_Cluster']],
+                            use_container_width=True
+                        )
+                        
+                        # Send email alerts if configured
+                        if (job_system.config.get('email_enabled', False) and 
+                            job_system.config.get('preferred_clusters')):
+                            
+                            if st.button("📧 Send Email Alert"):
+                                success = job_system.send_email_alert(
+                                    truly_new_jobs,
+                                    job_system.config['preferred_clusters']
+                                )
+                                if success:
+                                    st.success("✅ Email alert sent!")
+                                else:
+                                    st.warning("No matching jobs for your preferred clusters")
+                        
+                        # Option to save new jobs
+                        if st.button("💾 Add to Database"):
+                            if os.path.exists(job_system.data_path):
+                                existing_df = pd.read_csv(job_system.data_path)
+                                updated_df = pd.concat([existing_df, truly_new_jobs], ignore_index=True)
+                            else:
+                                updated_df = truly_new_jobs
+                            
+                            updated_df.to_csv(job_system.data_path, index=False)
+                            st.success("✅ New jobs added to database!")
+                    else:
+                        st.warning("Models not loaded. Showing jobs without cluster predictions.")
+                        st.dataframe(truly_new_jobs, use_container_width=True)
                 
                 else:
                     st.info("No new jobs found (all jobs already in database)")
-            
+                
             else:
                 st.warning("No jobs found. Try different keywords or check the website.")
     
@@ -470,69 +589,38 @@ def main():
             job_system.save_config()
             st.success("✅ Email settings saved!")
     
-    elif page == "⚙️ Configuration":
-        st.header("⚙️ System Configuration")
-        
-        # Basic settings
-        st.subheader("🔄 Scraping Settings")
-        
-        keywords = st.text_area(
-            "Default Keywords (one per line)",
-            value='\n'.join(job_system.config.get('keywords', ['data scientist', 'machine learning']))
-        )
-        
-        pages_to_scrape = st.number_input(
-            "Pages to Scrape per Keyword",
-            min_value=1,
-            max_value=10,
-            value=job_system.config.get('pages', 2)
-        )
-        
-        # Save configuration
-        if st.button("💾 Save Configuration"):
-            job_system.config.update({
-                'keywords': [k.strip() for k in keywords.split('\n') if k.strip()],
-                'pages': pages_to_scrape
-            })
-            job_system.save_config()
-            st.success("✅ Configuration saved!")
-    
     elif page == "📈 Analytics":
         st.header("📈 Job Market Analytics")
         
         if os.path.exists(job_system.data_path):
             df = pd.read_csv(job_system.data_path)
             
-            # Basic analytics
-            st.subheader("📊 Job Distribution")
-            
-            # Company distribution
-            company_counts = df['Company'].value_counts().head(10)
-            fig_company = px.bar(
-                x=company_counts.values,
-                y=company_counts.index,
-                orientation='h',
-                title="Top 10 Companies by Job Count"
+            # Experience level analysis
+            st.subheader("💼 Experience Level Distribution")
+            exp_counts = df['Experience'].value_counts()
+            fig_exp = px.pie(
+                values=exp_counts.values,
+                names=exp_counts.index,
+                title="Jobs by Experience Level"
             )
-            st.plotly_chart(fig_company, use_container_width=True)
+            st.plotly_chart(fig_exp, use_container_width=True)
             
-            # Location distribution
+            # Location analysis
             st.subheader("📍 Geographic Distribution")
             location_counts = df['Location'].value_counts().head(10)
-            fig_loc = px.pie(
-                values=location_counts.values,
-                names=location_counts.index,
+            fig_loc = px.bar(
+                x=location_counts.values,
+                y=location_counts.index,
+                orientation='h',
                 title="Top 10 Job Locations"
             )
             st.plotly_chart(fig_loc, use_container_width=True)
             
             # Skills analysis
-            st.subheader("🛠️ Skills Analysis")
+            st.subheader("🛠️ Most In-Demand Skills")
             all_skills = []
             for skills in df['Skills'].dropna():
-                if skills and str(skills) != 'nan':
-                    skill_tokens = simple_tokenizer(skills)
-                    all_skills.extend(skill_tokens)
+                all_skills.extend(custom_tokenizer(skills))
             
             if all_skills:
                 skill_counts = pd.Series(all_skills).value_counts().head(20)
