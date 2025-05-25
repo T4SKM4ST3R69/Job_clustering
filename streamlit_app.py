@@ -267,6 +267,28 @@ class JobClusteringSystem:
         
         return pd.DataFrame(jobs_list)
     
+    def save_jobs_to_database(self, new_jobs_df):
+        """Save jobs to the database file"""
+        try:
+            if os.path.exists(self.data_path):
+                # Load existing data and append new jobs
+                existing_df = pd.read_csv(self.data_path)
+                combined_df = pd.concat([existing_df, new_jobs_df], ignore_index=True)
+                # Remove duplicates based on title, company, and location
+                combined_df = combined_df.drop_duplicates(
+                    subset=['Title', 'Company', 'Location'], 
+                    keep='last'
+                )
+            else:
+                combined_df = new_jobs_df
+            
+            # Save to CSV
+            combined_df.to_csv(self.data_path, index=False)
+            return True, len(combined_df)
+        except Exception as e:
+            st.error(f"Error saving jobs to database: {str(e)}")
+            return False, 0
+    
     def identify_new_jobs(self, df_new):
         """Identify truly new jobs by comparing with history"""
         if df_new.empty:
@@ -453,7 +475,7 @@ def main():
             1. Go to the **🔄 Manual Scraping** page
             2. Enter keywords (e.g., "data scientist", "machine learning")
             3. Click "🚀 Start Scraping" to collect job data
-            4. Save the scraped jobs to the database
+            4. The data will be automatically saved to the database
             
             **Step 2: Train Clustering Model**
             1. Go to the **🤖 Train Clustering** page
@@ -536,6 +558,57 @@ def main():
             st.warning("📭 No job data found. Please scrape jobs first.")
             st.markdown("Go to **🔄 Manual Scraping** to collect job data before training clusters.")
     
+    elif page == "🔄 Manual Scraping":
+        st.header("🔄 Manual Job Scraping")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            keywords_input = st.text_area(
+                "Keywords (one per line)",
+                value="data scientist\nmachine learning engineer\ndata analyst",
+                height=100
+            )
+        
+        with col2:
+            pages_input = st.number_input(
+                "Pages per keyword",
+                min_value=1,
+                max_value=5,
+                value=2
+            )
+        
+        if st.button("🚀 Start Scraping"):
+            keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()]
+            
+            with st.spinner("Scraping jobs..."):
+                new_jobs_df = job_system.scrape_new_jobs(keywords, pages_input)
+            
+            if not new_jobs_df.empty:
+                st.success(f"✅ Scraped {len(new_jobs_df)} jobs!")
+                
+                # CRITICAL FIX: Automatically save to database
+                with st.spinner("Saving jobs to database..."):
+                    success, total_jobs = job_system.save_jobs_to_database(new_jobs_df)
+                
+                if success:
+                    st.success(f"✅ Jobs saved to database! Total jobs in database: {total_jobs}")
+                    
+                    # Show scraped jobs preview
+                    st.subheader("📋 Scraped Jobs Preview")
+                    st.dataframe(new_jobs_df.head(10), use_container_width=True)
+                    
+                    # Update job history
+                    job_system.identify_new_jobs(new_jobs_df)
+                    
+                    st.info("🎯 Next: Go to **🤖 Train Clustering** to create job clusters!")
+                    st.info("📊 Or check the **Dashboard** to see your data!")
+                
+                else:
+                    st.error("❌ Failed to save jobs to database.")
+                
+            else:
+                st.warning("No jobs found. Try different keywords or check the website.")
+    
     elif page == "⚙️ Configuration":
         st.header("⚙️ System Configuration")
         
@@ -596,62 +669,6 @@ def main():
             })
             job_system.save_config()
             st.success("✅ Configuration saved!")
-    
-    elif page == "🔄 Manual Scraping":
-        st.header("🔄 Manual Job Scraping")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            keywords_input = st.text_area(
-                "Keywords (one per line)",
-                value="data scientist\nmachine learning engineer\ndata analyst",
-                height=100
-            )
-        
-        with col2:
-            pages_input = st.number_input(
-                "Pages per keyword",
-                min_value=1,
-                max_value=5,
-                value=2
-            )
-        
-        if st.button("🚀 Start Scraping"):
-            keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()]
-            
-            with st.spinner("Scraping jobs..."):
-                new_jobs_df = job_system.scrape_new_jobs(keywords, pages_input)
-            
-            if not new_jobs_df.empty:
-                st.success(f"✅ Scraped {len(new_jobs_df)} jobs!")
-                
-                # Identify truly new jobs
-                truly_new_jobs = job_system.identify_new_jobs(new_jobs_df)
-                
-                if not truly_new_jobs.empty:
-                    st.info(f"🆕 Found {len(truly_new_jobs)} new jobs!")
-                    
-                    # Show new jobs
-                    st.subheader("New Jobs Found")
-                    st.dataframe(truly_new_jobs, use_container_width=True)
-                    
-                    # Option to save new jobs
-                    if st.button("💾 Add to Database"):
-                        if os.path.exists(job_system.data_path):
-                            existing_df = pd.read_csv(job_system.data_path)
-                            updated_df = pd.concat([existing_df, truly_new_jobs], ignore_index=True)
-                        else:
-                            updated_df = truly_new_jobs
-                        
-                        updated_df.to_csv(job_system.data_path, index=False)
-                        st.success("✅ New jobs added to database!")
-                        st.info("🎯 Next: Go to **🤖 Train Clustering** to create job clusters!")
-                
-                else:
-                    st.info("No new jobs found (all jobs already in database)")
-                
-            else:
-                st.warning("No jobs found. Try different keywords or check the website.")
     
     elif page == "📧 Email Setup":
         st.header("📧 Email Configuration")
@@ -803,7 +820,7 @@ def main():
     email_status = "✅ Configured" if job_system.config.get('email_enabled') else "❌ Not Setup"
     st.sidebar.markdown(f"**Email:** {email_status}")
     
-    # Data status
+    # Data status - FIXED to show actual data count
     if os.path.exists(job_system.data_path):
         df = pd.read_csv(job_system.data_path)
         data_status = f"✅ {len(df)} jobs"
