@@ -13,10 +13,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
 import os
 import json
 from pathlib import Path
 import hashlib
+import numpy as np
 
 # Page configuration
 st.set_page_config(
@@ -87,25 +89,14 @@ class JobClusteringSystem:
                 self.tfidf_vectorizer = joblib.load(self.vectorizer_path)
                 st.success("✅ Models loaded successfully!")
             else:
-                st.warning("❌ Model files not found. Creating fallback vectorizer...")
+                st.warning("❌ Model files not found. You can train new models from scraped data.")
                 self.kmeans_model = None
-                # Create fallback vectorizer without custom tokenizer to avoid serialization issues
-                self.tfidf_vectorizer = TfidfVectorizer(
-                    lowercase=True,
-                    max_features=1000,
-                    stop_words='english',
-                    token_pattern=r'[a-zA-Z]+(?:\s+[a-zA-Z]+)*'
-                )
+                self.tfidf_vectorizer = None
         except Exception as e:
             st.error(f"Error loading models: {str(e)}")
             st.info("Creating new vectorizer as fallback...")
             self.kmeans_model = None
-            # Fallback to simple vectorizer
-            self.tfidf_vectorizer = TfidfVectorizer(
-                lowercase=True,
-                max_features=1000,
-                stop_words='english'
-            )
+            self.tfidf_vectorizer = None
     
     def load_config(self):
         """Load email configuration"""
@@ -137,6 +128,53 @@ class JobClusteringSystem:
         """Generate unique hash for a job listing"""
         job_string = f"{job_data['Title']}{job_data['Company']}{job_data['Location']}"
         return hashlib.md5(job_string.encode()).hexdigest()
+    
+    def train_clustering_model(self, df, n_clusters=5):
+        """Train clustering model on job data"""
+        try:
+            # Prepare skills data for vectorization
+            skills_data = []
+            for skills in df['Skills'].fillna(''):
+                processed = preprocess_skills(skills)
+                skills_data.append(processed)
+            
+            # Create TfidfVectorizer
+            self.tfidf_vectorizer = TfidfVectorizer(
+                max_features=1000,
+                stop_words='english',
+                lowercase=True,
+                ngram_range=(1, 2)
+            )
+            
+            # Fit and transform skills data
+            skills_matrix = self.tfidf_vectorizer.fit_transform(skills_data)
+            
+            # Train KMeans model
+            self.kmeans_model = KMeans(
+                n_clusters=n_clusters,
+                random_state=42,
+                n_init=10,
+                max_iter=300
+            )
+            
+            # Fit the model
+            clusters = self.kmeans_model.fit_predict(skills_matrix)
+            
+            # Add cluster labels to dataframe
+            df['Cluster'] = clusters
+            
+            # Save models
+            joblib.dump(self.kmeans_model, self.model_path)
+            joblib.dump(self.tfidf_vectorizer, self.vectorizer_path)
+            
+            # Save clustered data
+            df.to_csv(self.data_path, index=False)
+            
+            return df, True
+            
+        except Exception as e:
+            st.error(f"Error training clustering model: {str(e)}")
+            return df, False
     
     def predict_cluster(self, skills_text):
         """Predict cluster for new job based on skills"""
@@ -318,7 +356,7 @@ def main():
     st.sidebar.title("🔍 Job Alert System")
     page = st.sidebar.selectbox(
         "Navigate to:",
-        ["📊 Dashboard", "⚙️ Configuration", "🔄 Manual Scraping", "📧 Email Setup", "📈 Analytics"]
+        ["📊 Dashboard", "⚙️ Configuration", "🔄 Manual Scraping", "🤖 Train Clustering", "📧 Email Setup", "📈 Analytics"]
     )
     
     if page == "📊 Dashboard":
@@ -339,7 +377,7 @@ def main():
                 if 'Cluster' in df.columns:
                     st.metric("Clusters", df['Cluster'].nunique())
                 else:
-                    st.metric("Clusters", "N/A")
+                    st.metric("Clusters", "Not Trained")
             with col4:
                 if job_system.job_history.get('last_check'):
                     last_check = datetime.fromisoformat(job_system.job_history['last_check'])
@@ -385,6 +423,9 @@ def main():
                 )
             else:
                 st.info("💡 No cluster data found. Jobs have been scraped but not yet clustered.")
+                st.markdown("### 🎯 Next Steps:")
+                st.markdown("1. Go to **🤖 Train Clustering** to create clusters from your job data")
+                st.markdown("2. Or scrape more jobs first if you need more data")
             
             # Company distribution
             st.subheader("🏢 Top Companies")
@@ -406,26 +447,94 @@ def main():
             st.markdown("""
             ### 🚀 Getting Started
             
-            To start using the system, you have two options:
+            To start using the system, follow these steps:
             
-            **Option 1: Scrape New Jobs**
+            **Step 1: Scrape Job Data**
             1. Go to the **🔄 Manual Scraping** page
             2. Enter keywords (e.g., "data scientist", "machine learning")
             3. Click "🚀 Start Scraping" to collect job data
             4. Save the scraped jobs to the database
             
-            **Option 2: Load Existing Data**
-            1. If you have a `clustered_jobs.csv` file, place it in the same directory as this app
-            2. Refresh the page to see your data
+            **Step 2: Train Clustering Model**
+            1. Go to the **🤖 Train Clustering** page
+            2. Choose the number of clusters
+            3. Train the model on your scraped data
             
-            **Need Clustering Models?**
-            - Train clustering models using your scraped data
-            - Models will be saved as `kmeans_model.joblib` and `tfidf_vectorizer.joblib`
+            **Step 3: Configure Alerts**
+            1. Set up email notifications
+            2. Choose preferred clusters for alerts
             """)
             
             # Quick start button
             if st.button("🚀 Start Scraping Jobs Now"):
-                st.switch_page("🔄 Manual Scraping")
+                st.rerun()
+    
+    elif page == "🤖 Train Clustering":
+        st.header("🤖 Train Clustering Model")
+        
+        if os.path.exists(job_system.data_path):
+            df = pd.read_csv(job_system.data_path)
+            
+            st.info(f"Found {len(df)} jobs in database. Ready to train clustering model!")
+            
+            # Clustering parameters
+            col1, col2 = st.columns(2)
+            with col1:
+                n_clusters = st.slider(
+                    "Number of Clusters",
+                    min_value=2,
+                    max_value=10,
+                    value=5,
+                    help="Choose how many job categories to create"
+                )
+            
+            with col2:
+                st.write("**Current Status:**")
+                if 'Cluster' in df.columns:
+                    st.success(f"✅ Already clustered into {df['Cluster'].nunique()} groups")
+                else:
+                    st.warning("❌ No clustering performed yet")
+            
+            # Preview of skills data
+            st.subheader("📋 Skills Data Preview")
+            skills_preview = df[['Title', 'Company', 'Skills']].head()
+            st.dataframe(skills_preview, use_container_width=True)
+            
+            # Train clustering model
+            if st.button("🎯 Train Clustering Model"):
+                with st.spinner("Training clustering model..."):
+                    clustered_df, success = job_system.train_clustering_model(df, n_clusters)
+                
+                if success:
+                    st.success("✅ Clustering model trained successfully!")
+                    
+                    # Show cluster distribution
+                    st.subheader("📊 Cluster Results")
+                    cluster_counts = clustered_df['Cluster'].value_counts().sort_index()
+                    
+                    fig = px.bar(
+                        x=cluster_counts.index,
+                        y=cluster_counts.values,
+                        title=f"Distribution of {n_clusters} Job Clusters",
+                        labels={'x': 'Cluster ID', 'y': 'Number of Jobs'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show sample from each cluster
+                    st.subheader("🔍 Sample Jobs from Each Cluster")
+                    for cluster_id in sorted(clustered_df['Cluster'].unique()):
+                        with st.expander(f"Cluster {cluster_id} ({len(clustered_df[clustered_df['Cluster'] == cluster_id])} jobs)"):
+                            cluster_sample = clustered_df[clustered_df['Cluster'] == cluster_id][['Title', 'Company', 'Skills']].head(3)
+                            st.dataframe(cluster_sample, use_container_width=True)
+                    
+                    st.info("🔄 Go back to Dashboard to see the full clustering analysis!")
+                
+                else:
+                    st.error("❌ Failed to train clustering model. Please check your data.")
+        
+        else:
+            st.warning("📭 No job data found. Please scrape jobs first.")
+            st.markdown("Go to **🔄 Manual Scraping** to collect job data before training clusters.")
     
     elif page == "⚙️ Configuration":
         st.header("⚙️ System Configuration")
@@ -471,7 +580,7 @@ def main():
                 )
             else:
                 preferred_clusters = []
-                st.warning("No cluster data found. Please run clustering first.")
+                st.warning("No cluster data found. Please train clustering model first.")
         else:
             preferred_clusters = []
             st.warning("Load job data first to see available clusters")
@@ -522,35 +631,9 @@ def main():
                 if not truly_new_jobs.empty:
                     st.info(f"🆕 Found {len(truly_new_jobs)} new jobs!")
                     
-                    # Add cluster predictions if model exists
-                    if job_system.kmeans_model and job_system.tfidf_vectorizer:
-                        truly_new_jobs['Predicted_Cluster'] = truly_new_jobs['Skills'].apply(
-                            job_system.predict_cluster
-                        )
-                        
-                        # Show new jobs
-                        st.subheader("New Jobs Found")
-                        st.dataframe(
-                            truly_new_jobs[['Title', 'Company', 'Location', 'Skills', 'Predicted_Cluster']],
-                            use_container_width=True
-                        )
-                        
-                        # Send email alerts if configured
-                        if (job_system.config.get('email_enabled', False) and 
-                            job_system.config.get('preferred_clusters')):
-                            
-                            if st.button("📧 Send Email Alert"):
-                                success = job_system.send_email_alert(
-                                    truly_new_jobs,
-                                    job_system.config['preferred_clusters']
-                                )
-                                if success:
-                                    st.success("✅ Email alert sent!")
-                                else:
-                                    st.warning("No matching jobs for your preferred clusters")
-                    else:
-                        st.warning("Models not loaded. Showing jobs without cluster predictions.")
-                        st.dataframe(truly_new_jobs, use_container_width=True)
+                    # Show new jobs
+                    st.subheader("New Jobs Found")
+                    st.dataframe(truly_new_jobs, use_container_width=True)
                     
                     # Option to save new jobs
                     if st.button("💾 Add to Database"):
@@ -562,7 +645,7 @@ def main():
                         
                         updated_df.to_csv(job_system.data_path, index=False)
                         st.success("✅ New jobs added to database!")
-                        st.info("🔄 Refresh the Dashboard to see updated data.")
+                        st.info("🎯 Next: Go to **🤖 Train Clustering** to create job clusters!")
                 
                 else:
                     st.info("No new jobs found (all jobs already in database)")
@@ -633,6 +716,43 @@ def main():
         if os.path.exists(job_system.data_path):
             df = pd.read_csv(job_system.data_path)
             
+            # Check if clustering has been done
+            if 'Cluster' in df.columns:
+                # Cluster-based analytics
+                st.subheader("🎯 Cluster Analysis")
+                
+                # Cluster distribution pie chart
+                cluster_counts = df['Cluster'].value_counts().sort_index()
+                fig_cluster = px.pie(
+                    values=cluster_counts.values,
+                    names=[f"Cluster {i}" for i in cluster_counts.index],
+                    title="Job Distribution by Cluster"
+                )
+                st.plotly_chart(fig_cluster, use_container_width=True)
+                
+                # Skills analysis by cluster
+                st.subheader("🛠️ Skills Analysis by Cluster")
+                selected_cluster = st.selectbox(
+                    "Select Cluster for Skills Analysis:",
+                    sorted(df['Cluster'].unique()),
+                    format_func=lambda x: f"Cluster {x}"
+                )
+                
+                cluster_data = df[df['Cluster'] == selected_cluster]
+                all_skills = []
+                for skills in cluster_data['Skills'].dropna():
+                    all_skills.extend(custom_tokenizer(skills))
+                
+                if all_skills:
+                    skill_counts = pd.Series(all_skills).value_counts().head(15)
+                    fig_skills = px.bar(
+                        x=skill_counts.values,
+                        y=skill_counts.index,
+                        orientation='h',
+                        title=f"Top Skills in Cluster {selected_cluster}"
+                    )
+                    st.plotly_chart(fig_skills, use_container_width=True)
+            
             # Experience level analysis
             st.subheader("💼 Experience Level Distribution")
             exp_counts = df['Experience'].value_counts()
@@ -654,8 +774,8 @@ def main():
             )
             st.plotly_chart(fig_loc, use_container_width=True)
             
-            # Skills analysis
-            st.subheader("🛠️ Most In-Demand Skills")
+            # Overall skills analysis
+            st.subheader("🛠️ Most In-Demand Skills (Overall)")
             all_skills = []
             for skills in df['Skills'].dropna():
                 all_skills.extend(custom_tokenizer(skills))
@@ -682,6 +802,16 @@ def main():
     
     email_status = "✅ Configured" if job_system.config.get('email_enabled') else "❌ Not Setup"
     st.sidebar.markdown(f"**Email:** {email_status}")
+    
+    # Data status
+    if os.path.exists(job_system.data_path):
+        df = pd.read_csv(job_system.data_path)
+        data_status = f"✅ {len(df)} jobs"
+        if 'Cluster' in df.columns:
+            data_status += f" ({df['Cluster'].nunique()} clusters)"
+    else:
+        data_status = "❌ No data"
+    st.sidebar.markdown(f"**Data:** {data_status}")
     
     if job_system.job_history.get('last_check'):
         last_check = datetime.fromisoformat(job_system.job_history['last_check'])
