@@ -1,11 +1,9 @@
 streamlit
 pandas
-numpy
-scikit-learn
 beautifulsoup4
 requests
+scikit-learn
 joblib
+yagmail
 schedule
-matplotlib
-seaborn
-plotly
+lxml
